@@ -1,8 +1,15 @@
 import 'package:flutter/material.dart';
 import 'screens/alarm_manager_screen.dart';
 import 'screens/alarm_screen.dart';
+import 'services/places_service.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  
+  // Initialize PlacesService
+  final placesService = PlacesService();
+  await placesService.initialize();
+  
   runApp(const MyApp());
 }
 
@@ -25,7 +32,7 @@ class MyApp extends StatelessWidget {
       initialRoute: '/',
       routes: {
         '/': (context) => const AlarmManagerScreen(),
-        '/alarm': (context) => const AlarmScreen(),
+        '/alarm': (context) => const AlarmScreen()
       },
     );
   }

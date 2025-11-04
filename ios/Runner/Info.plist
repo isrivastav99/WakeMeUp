@@ -57,5 +57,7 @@
 	<true/>
 	<key>io.flutter.embedded_views_preview</key>
 	<true/>
+	<key>GMSApiKey</key>
+	<string>AIzaSyDtOY4mSwiJlUlb51SAcH7xhgyeV-0hFt4</string>
 </dict>
 </plist>

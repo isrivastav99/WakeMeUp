@@ -7,7 +7,8 @@ import 'package:location/location.dart';
 class Alarm {
   final String id;
   final String name;
-  final LatLng destination;
+  final LatLng initialLocation; // Location when alarm was created
+  final LatLng destination; // Destination to reach
   final double radius;
   bool isActive;
   String? ringtonePath;
@@ -15,6 +16,7 @@ class Alarm {
   Alarm({
     required this.id,
     required this.name,
+    required this.initialLocation,
     required this.destination,
     required this.radius,
     this.isActive = false,
@@ -24,6 +26,10 @@ class Alarm {
   Map<String, dynamic> toJson() => {
         'id': id,
         'name': name,
+        'initialLocation': {
+          'latitude': initialLocation.latitude,
+          'longitude': initialLocation.longitude,
+        },
         'destination': {
           'latitude': destination.latitude,
           'longitude': destination.longitude,
@@ -36,6 +42,16 @@ class Alarm {
   factory Alarm.fromJson(Map<String, dynamic> json) => Alarm(
         id: json['id'],
         name: json['name'],
+        initialLocation: json['initialLocation'] != null
+            ? LatLng(
+                json['initialLocation']['latitude'],
+                json['initialLocation']['longitude'],
+              )
+            : LatLng(
+                // Fallback for old alarms without initialLocation
+                json['destination']['latitude'],
+                json['destination']['longitude'],
+              ),
         destination: LatLng(
           json['destination']['latitude'],
           json['destination']['longitude'],

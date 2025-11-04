@@ -4,8 +4,6 @@ import 'package:location/location.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
-import 'dart:html' as html;
-import 'dart:js_util';
 
 class LocationService {
   static final LocationService _instance = LocationService._internal();
@@ -14,14 +12,11 @@ class LocationService {
 
   final Location _location = Location();
   final List<Function()> _proximityCallbacks = [];
-  Timer? _locationTimer;
   bool _isTracking = false;
   bool _serviceEnabled = false;
   PermissionStatus? _permissionGranted;
   StreamController<LatLng>? _locationController;
   StreamSubscription<LocationData>? _locationSubscription;
-  html.Geolocation? _webGeolocation;
-  Timer? _webLocationTimer;
 
   void _log(String message) {
     debugPrint('📍 LocationService: $message');
@@ -29,17 +24,14 @@ class LocationService {
 
   Future<bool> initialize() async {
     try {
-      if (kIsWeb) {
-        _log('Initializing web geolocation');
-        _webGeolocation = html.window.navigator.geolocation;
-        return true;
-      }
+      _log('Initializing location service for mobile platform');
 
-      // Initialize location settings
+      // Initialize location settings first
+      // Use lower accuracy for simulator, high for device
       await _location.changeSettings(
         accuracy: LocationAccuracy.high,
-        interval: 10000,
-        distanceFilter: 10,
+        interval: 5000, // Reduced from 10000 to get updates faster
+        distanceFilter: 5, // Reduced from 10 to get updates faster
       );
 
       // Check if location service is enabled
@@ -47,19 +39,24 @@ class LocationService {
       if (!_serviceEnabled) {
         _serviceEnabled = await _location.requestService();
         if (!_serviceEnabled) {
+          _log('Location service is not enabled');
           return false;
         }
       }
 
-      // Check location permission
+      // Check initial permission status (but don't request yet - let requestPermission() handle it)
+      // This is just to cache the status, so we don't request unnecessarily
       _permissionGranted = await _location.hasPermission();
-      if (_permissionGranted == PermissionStatus.denied) {
-        _permissionGranted = await _location.requestPermission();
-        if (_permissionGranted != PermissionStatus.granted) {
-          return false;
-        }
+      
+      // If permission is already granted, we're good
+      if (_permissionGranted == PermissionStatus.granted ||
+          _permissionGranted == PermissionStatus.grantedLimited) {
+        _log('Location permission already granted');
+      } else {
+        _log('Location permission not yet granted - will be requested when needed');
       }
 
+      _log('Location service initialized successfully');
       return true;
     } catch (e) {
       _log('Error initializing location service: $e');
@@ -69,59 +66,60 @@ class LocationService {
 
   Future<bool> requestPermission() async {
     try {
-      if (kIsWeb) {
-        try {
-          final completer = Completer<bool>();
-          
-          void successCallback(html.Geoposition position) {
-            _log('Web geolocation permission granted');
-            completer.complete(true);
-          }
-
-          void errorCallback(dynamic error) {
-            String errorMessage;
-            final errorCode = getProperty(error, 'code');
-            if (errorCode != null) {
-              switch (errorCode) {
-                case 1: // PERMISSION_DENIED
-                  errorMessage = 'User denied the request for Geolocation';
-                  break;
-                case 2: // POSITION_UNAVAILABLE
-                  errorMessage = 'Location information is unavailable';
-                  break;
-                case 3: // TIMEOUT
-                  errorMessage = 'The request to get user location timed out';
-                  break;
-                default:
-                  errorMessage = 'An unknown error occurred';
-              }
-            } else {
-              errorMessage = 'An unknown error occurred: $error';
-            }
-            _log('Web geolocation error: $errorMessage');
-            completer.complete(false);
-          }
-
-          _webGeolocation!.getCurrentPosition().then(successCallback).catchError(errorCallback);
-          return await completer.future;
-        } catch (e) {
-          _log('Web permission request failed: $e');
-          return false;
-        }
+      // Check if we already have permission cached (avoid redundant checks)
+      if (_permissionGranted == PermissionStatus.granted ||
+          _permissionGranted == PermissionStatus.grantedLimited) {
+        _log('Location permission already granted (cached)');
+        return true;
       }
+
+      _log('Checking location permission status...');
 
       bool serviceEnabled = await _location.serviceEnabled();
       if (!serviceEnabled) {
         serviceEnabled = await _location.requestService();
-        if (!serviceEnabled) return false;
+        if (!serviceEnabled) {
+          _log('Location service could not be enabled');
+          return false;
+        }
       }
 
+      // Check current permission status
       PermissionStatus permissionGranted = await _location.hasPermission();
-      if (permissionGranted == PermissionStatus.denied) {
+      
+      // Update cached status
+      _permissionGranted = permissionGranted;
+      
+      // If permission is already granted, return early
+      if (permissionGranted == PermissionStatus.granted ||
+          permissionGranted == PermissionStatus.grantedLimited) {
+        _log('Location permission already granted');
+        return true;
+      }
+      
+      // Only request if permission is denied
+      if (permissionGranted == PermissionStatus.denied ||
+          permissionGranted == PermissionStatus.deniedForever) {
+        _log('Requesting location permission...');
+        
+        // Request permission - triggers iOS locationManagerDidChangeAuthorization callback
         permissionGranted = await _location.requestPermission();
-        if (permissionGranted != PermissionStatus.granted) return false;
+        
+        // Update cached status
+        _permissionGranted = permissionGranted;
+        
+        // Small delay to allow iOS callback to fully process
+        // This helps minimize the synchronous authorization check warning
+        await Future.delayed(const Duration(milliseconds: 200));
+        
+        if (permissionGranted != PermissionStatus.granted &&
+            permissionGranted != PermissionStatus.grantedLimited) {
+          _log('Location permission denied by user');
+          return false;
+        }
       }
 
+      _log('Location permission granted');
       return true;
     } catch (e) {
       _log('Error requesting location permission: $e');
@@ -129,61 +127,54 @@ class LocationService {
     }
   }
 
+  /// Gets current location asynchronously without blocking
+  /// Returns null if location cannot be obtained
   Future<LatLng?> getCurrentLocation() async {
+    // This method is already async and non-blocking
+    // The timeout doesn't make it synchronous - it just ensures the Future completes
     try {
-      if (kIsWeb) {
-        try {
-          final completer = Completer<LatLng?>();
-          
-          void successCallback(html.Geoposition position) {
-            if (position.coords != null) {
-              completer.complete(LatLng(
-                (position.coords!.latitude ?? 0).toDouble(),
-                (position.coords!.longitude ?? 0).toDouble(),
-              ));
-            } else {
-              _log('Error: Coordinates are null');
-              completer.complete(null);
-            }
-          }
-
-          void errorCallback(dynamic error) {
-            String errorMessage;
-            final errorCode = getProperty(error, 'code');
-            if (errorCode != null) {
-              switch (errorCode) {
-                case 1: // PERMISSION_DENIED
-                  errorMessage = 'User denied the request for Geolocation';
-                  break;
-                case 2: // POSITION_UNAVAILABLE
-                  errorMessage = 'Location information is unavailable';
-                  break;
-                case 3: // TIMEOUT
-                  errorMessage = 'The request to get user location timed out';
-                  break;
-                default:
-                  errorMessage = 'An unknown error occurred';
-              }
-            } else {
-              errorMessage = 'An unknown error occurred: $error';
-            }
-            _log('Error getting web location: $errorMessage');
-            completer.complete(null);
-          }
-
-          _webGeolocation!.getCurrentPosition().then(successCallback).catchError(errorCallback);
-          return await completer.future;
-        } catch (e) {
-          _log('Error getting web location: $e');
-          return null;
-        }
+      _log('Getting current location for mobile platform (async, non-blocking)');
+      
+      // Ensure we have permission before trying to get location
+      // This is also async, so it won't block
+      final hasPermission = await requestPermission();
+      if (!hasPermission) {
+        _log('Permission not granted, cannot get location');
+        return null;
       }
-
-      final locationData = await _location.getLocation();
-      return LatLng(
-        locationData.latitude ?? 0,
-        locationData.longitude ?? 0,
+      
+      // Get location asynchronously with timeout
+      // The timeout is just a safety mechanism - the operation remains async
+      // Even though we use 'await', this doesn't block the main thread - it's still async
+      // Note: getLocation() returns Future<LocationData> (non-nullable), but coordinates can be null
+      LocationData locationData;
+      try {
+        locationData = await _location.getLocation().timeout(
+          const Duration(seconds: 10),
+        );
+      } on TimeoutException {
+        _log('Timeout waiting for location - this may happen on iOS simulator');
+        return null;
+      } catch (e) {
+        // Catch any other exceptions (permission denied, service unavailable, etc.)
+        _log('Exception getting location: $e');
+        return null;
+      }
+      
+      // Check if coordinates are null (LocationData object itself is never null, but coordinates can be)
+      if (locationData.latitude == null || locationData.longitude == null) {
+        _log('Location coordinates are null - latitude: ${locationData.latitude}, longitude: ${locationData.longitude}');
+        _log('This may happen if location services are not available or GPS signal is weak');
+        return null;
+      }
+      
+      final latLng = LatLng(
+        locationData.latitude!,
+        locationData.longitude!,
       );
+      
+      _log('Current location obtained: ${latLng.latitude}, ${latLng.longitude}');
+      return latLng;
     } catch (e) {
       _log('Error getting current location: $e');
       return null;
@@ -196,70 +187,60 @@ class LocationService {
   }
 
   Future<void> startTracking() async {
-    if (_isTracking) return;
+    if (_isTracking) {
+      _log('Location tracking is already active');
+      return;
+    }
 
+    _log('Starting location tracking for mobile platform');
+
+    // Check permission - requestPermission() will check cache first and only request if needed
     final hasPermission = await requestPermission();
     if (!hasPermission) {
-      _log('Location permission not granted. Requesting permission again...');
-      // Try one more time to get permission
-      final retryPermission = await requestPermission();
-      if (!retryPermission) {
-        throw Exception('Location permission not granted');
-      }
+      _log('Location permission not granted - cannot start tracking');
+      throw Exception('Location permission not granted');
     }
 
     _isTracking = true;
 
-    if (kIsWeb) {
-      // For web, we'll use a timer to periodically get the current location
-      _webLocationTimer = Timer.periodic(const Duration(seconds: 10), (timer) async {
-        try {
-          final position = await getCurrentLocation();
-          if (position != null) {
-            _locationController?.add(position);
-          }
-        } catch (e) {
-          _log('Error getting web location: $e');
-          _isTracking = false;
-          timer.cancel();
-        }
-      });
-
-      // Get initial location
-      try {
-        final position = await getCurrentLocation();
-        if (position != null) {
-          _locationController?.add(position);
-        }
-      } catch (e) {
-        _log('Error getting initial web location: $e');
-      }
-    } else {
-      _locationSubscription = _location.onLocationChanged.listen(
-        (LocationData locationData) {
+    _locationSubscription = _location.onLocationChanged.listen(
+      (LocationData locationData) {
+        _log('Location update received - latitude: ${locationData.latitude}, longitude: ${locationData.longitude}');
+        if (locationData.latitude != null && locationData.longitude != null) {
           final latLng = LatLng(
-            locationData.latitude ?? 0,
-            locationData.longitude ?? 0,
+            locationData.latitude!,
+            locationData.longitude!,
           );
           _locationController?.add(latLng);
-        },
-        onError: (error) {
-          _log('Location error: $error');
-          _isTracking = false;
-        },
-      );
-    }
+          _log('Location updated and sent to stream: ${latLng.latitude}, ${latLng.longitude}');
+        } else {
+          _log('Location data received but coordinates are null');
+        }
+      },
+      onError: (error) {
+        _log('Location tracking error: $error');
+        _log('Note: On iOS simulator, make sure to set a custom location via Debug > Location > Custom Location');
+        _isTracking = false;
+      },
+      cancelOnError: false,
+    );
+
+    _log('Location tracking started successfully');
   }
 
   Future<void> stopTracking() async {
-    _isTracking = false;
-    if (kIsWeb) {
-      _webLocationTimer?.cancel();
-      _webLocationTimer = null;
-    } else {
-      await _locationSubscription?.cancel();
-      _locationSubscription = null;
+    if (!_isTracking) {
+      _log('Location tracking is not active');
+      return;
     }
+
+    _log('Stopping location tracking');
+    _isTracking = false;
+    
+    await _locationSubscription?.cancel();
+    _locationSubscription = null;
+    
+    _log('Location tracking stopped');
   }
 
   void addProximityCallback(Function() callback) {
